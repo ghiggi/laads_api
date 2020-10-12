@@ -10,6 +10,9 @@ laads_api currently relies on modapsclient to interface the LAADS Web Service Cl
 laads_api is not yet a package, so please change the path in the laads_api/io.py and in the scripts.
 
 Packages required: 
-pip install modapsclient
-pip install numpy
-pip install pandas  
+
+`pip install modapsclient`
+
+`pip install numpy`
+
+`pip install pandas`
