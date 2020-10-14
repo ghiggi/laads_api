@@ -11,6 +11,7 @@ import os
 os.chdir('/home/ghiggi/laads_api')          # CHANGE HERE  !!!
 import datetime 
 from laads_api.io import download 
+from laads_api.io import run
 # from laads_api.io import find_server_filepaths 
 # from laads_api.io import find_disk_filepaths
 
@@ -48,17 +49,24 @@ APP_KEY = '19412E7E-0BF1-11EB-9E3A-A1B02ADBF251'
 
 #----------------------------------------------------------------------------.
 ### Download data 
-download(base_DIR = base_DIR,
-         APP_KEY = APP_KEY, 
-         instrument = instrument,
-         satellite = satellite,
-         products = products,
-         start_time = start_time, 
-         end_time = end_time,
-         bbox = bbox, 
-         collections = collections)
+# - Update libssl-dev ro the most recent version !
+l_cmds_err = download(base_DIR = base_DIR,
+                      APP_KEY = APP_KEY, 
+                      instrument = instrument,
+                      satellite = satellite,
+                      products = products,
+                      start_time = start_time, 
+                      end_time = end_time,
+                      bbox = bbox, 
+                      collections = collections,
+                      transfer_tool = "wget",
+                      n_threads = 10)
  
+# Try to rerun commands that had errors
+run(l_cmds_err, n_threads = 10)
+
 #----------------------------------------------------------------------------.   
 # To DEBUG 
+# force_download = False
 # connection_type = 'https'
 # output_tuple = True

@@ -7,12 +7,13 @@ Created on Mon Sep 14 15:07:38 2020
 """
 import os 
 os.chdir('/home/ghiggi/laads_api')
-
+import subprocess
+import concurrent.futures
+import datetime
 import modapsclient as m
 import numpy as np
-# import tqdm
 import pandas as pd 
-import datetime
+from tqdm import tqdm
 from itertools import chain
 from laads_api.utils.utils_string import str_replace
 # from laads_api.utils.utils_string import str_extract
@@ -375,7 +376,16 @@ def check_base_DIR(base_DIR):
             raise ValueError("The path", base_DIR, 'does not exist on disk')
         if not os.path.isdir(base_DIR):
             raise ValueError(base_DIR, 'is not a folder path')
-                   
+
+def check_transfer_tool(transfer_tool, force_download):
+    if not isinstance(transfer_tool, str):
+        raise TypeError("Specify 'transfer_tool' as a string")
+    if (transfer_tool not in ['curl','wget']):
+        raise ValueError("Specify valid 'transfer_tool'. 'curl' or 'wget'")
+    if (force_download is True):
+        transfer_tool = "curl"
+        print("Since force_download is set to True, curl is used as transfer_tool")
+    return transfer_tool
 #-----------------------------------------------------------------------------.
 ##############################
 ### File search functions ####
@@ -527,11 +537,30 @@ def curl_cmd(server_path, disk_path, APP_KEY):
         os.makedirs(disk_dir)
     #-------------------------------------------------------------------------.
     ## Define command to run
-    # # -L -O -C : to continue download where interrupted 
+    # - v : verbose
+    # --fail : fail silently on server errors. Allow to deal better with failed attemps
+    #           Return error > 0 when the request fails
+    # --silent: hides the progress and error
+    # --retry 10: retry 10 times 
+    # --retry-delay 5: with 5 secs delays 
+    # --retry-max-time 60*10: total time before it's considered failed
+    # --connect-timeout 20: limits time curl spend trying to connect ot the host to 20 secs
+    # --get url: specify the url 
+    # -o : write to file instead of stdout 
+    
+    # cmd = "".join(["curl ",
+    #                "-v ",
+    #                "-H 'Authorization: Bearer ", APP_KEY,"' ",
+    #                server_path, " > ", disk_path])
     cmd = "".join(["curl ",
                    "-v ",
+                   "--connect-timeout 20 ",
+                   "--retry 100 ", 
+                   "--retry-delay 5 ",
+                   "--tlsv1.2 ", # TSL/SSL
                    "-H 'Authorization: Bearer ", APP_KEY,"' ",
-                   server_path, " > ", disk_path])
+                   "--get ", server_path, " ",
+                   "-o ", disk_path])
     #-------------------------------------------------------------------------.
     return cmd    
 
@@ -544,33 +573,55 @@ def wget_cmd(server_path, disk_path, APP_KEY):
         os.makedirs(disk_dir)
     #-------------------------------------------------------------------------.
     ## Define command to run
-    # cmd = "".join(["wget ",
-    #                "-e robots=off", # execute a `.wgetrc'-style command
-    #                "-m "
-    #                "-np ", # don't ascend to the parent directory
-    #                "-R .html,.tmp ", # comma-separated list of rejected extensions
-    #                "-nH ", # don't create host directories
-    #                "--cut-dirs=3 ",
-    #                server_path," "
-    #                "-H 'Authorization: Bearer ", APP_KEY,"' ",
-    #                disk_path])
     cmd = "".join(["wget ",
-                 "-e robots=off ",  # allow wget to work ignoring robots.txt file  
-                 # "-r ",          # recursively download data in any subdirectories  
-                 # "-m ",          # -N -r -l inf --no-remove-listing
+                 "-e robots=off ",  # allow wget to work ignoring robots.txt file 
                  "-np ",           # prevents files from parent directories from being downloaded
                  "-R .html,.tmp ", # comma-separated list of rejected extensions
                  "-nH ",           # don't create host directories
+                 "--secure-protocol=TLSv1_2 ", # TLS v1.2
                  "--header 'Authorization: Bearer ", APP_KEY,"' ", # identification
                  "-c ",            # continue from where it left 
-                 "--read-timeout=5 ", # if no data arriving in 5 seconds, retry
+                 "--read-timeout=60 ", # if no data arriving for 5 seconds, retry
                  "--tries=0 ",     # retry forever
                  "-O ", disk_path," ",
                  server_path])
     #-------------------------------------------------------------------------.
     return cmd    
-            
- 
+
+def run(commands, n_threads = 10):
+    """
+    Run bash commands in parallel using multithreading.
+
+    Parameters
+    ----------
+    commands : list
+        list of commands to execute in the terminal.
+    n_threads : int, optional
+        Number of parallel download. The default is 10.
+        LAADS currently accept max 10 parallel download per APP KEY.
+        
+    Returns
+    -------
+    List of commands which didn't complete. 
+
+    """
+    n_threads = min(n_threads, 10) 
+    n_cmds = len(commands)
+    with tqdm(total=n_cmds) as pbar: 
+        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+            dict_futures = {executor.submit(subprocess.check_call, cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL): cmd for cmd in commands}
+            # List cmds that didn't work 
+            l_cmd_error = []
+            for future in concurrent.futures.as_completed(dict_futures.keys()):
+                pbar.update(1) # Update the progress bar 
+                # Collect all commands that caused problems 
+                if future.exception() is not None:
+                    l_cmd_error.append(dict_futures[future])
+    
+    return l_cmd_error         
+
+
+##----------------------------------------------------------------------------.
 def download(base_DIR, 
              APP_KEY,
              instrument,
@@ -580,8 +631,11 @@ def download(base_DIR,
              end_time,
              bbox = None, 
              collections = None,
-             force_download = False):
-    #-------------------------------------------------------------------------.    
+             force_download = False,
+             n_threads = 10, 
+             transfer_tool = "curl"):
+    #-------------------------------------------------------------------------.  
+    transfer_tool = check_transfer_tool(transfer_tool, force_download=force_download)
     # Retrieve filepaths 
     server_filepaths, disk_filepaths = find_server_filepaths(base_DIR = base_DIR, 
                                                              satellite = satellite,
@@ -601,18 +655,17 @@ def download(base_DIR,
         disk_filepaths = list(np.array(disk_filepaths)[idx_not_exist]) 
         server_filepaths = list(np.array(server_filepaths)[idx_not_exist]) 
     #-------------------------------------------------------------------------.
-    # Retrieve commands 
-    # list_cmd = [curl_cmd(server_path, disk_path, APP_KEY) for server_path, disk_path in zip(server_filepaths,disk_filepaths)]
-    list_cmd = [wget_cmd(server_path, disk_path, APP_KEY) for server_path, disk_path in zip(server_filepaths,disk_filepaths)]
-    # Download file 
-    list_out = []
-    for cmd in list_cmd:
-        out = os.system(cmd)
-        list_out.append(out)
-    
-    # Display errors
-    # np.array(list_out) == 0
-    
+    # Retrieve commands
+    if (transfer_tool == "curl"):
+        list_cmd = [curl_cmd(server_path, disk_path, APP_KEY) for server_path, disk_path in zip(server_filepaths,disk_filepaths)]
+    else:    
+        list_cmd = [wget_cmd(server_path, disk_path, APP_KEY) for server_path, disk_path in zip(server_filepaths,disk_filepaths)]
+    ##-------------------------------------------------------------------------.
+    # Run download commands in parallel
+    # - Return a list of commands that didn't complete
+    bad_cmds = run(list_cmd, n_threads = n_threads)
+    return bad_cmds 
+       
 ##----------------------------------------------------------------------------.
 
 
