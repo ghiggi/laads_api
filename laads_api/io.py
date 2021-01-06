@@ -6,7 +6,6 @@ Created on Mon Sep 14 15:07:38 2020
 @author: ghiggi
 """
 import os 
-os.chdir('/home/ghiggi/laads_api')
 import subprocess
 import concurrent.futures
 import datetime
@@ -23,18 +22,6 @@ from laads_api.utils.utils_string import str_replace
 # from laads_api.utils.utils_string import str_detect
 # from laads_api.utils.utils_string import subset_list_by_boolean
 
-##----------------------------------------------------------------------------.
-## Extend subset to hourly/minutes/seconds
-## Remove need specify satellite and instrument from find_*, download_*
-##----------------------------------------------------------------------------.
-## Not available via OpenDAP
-# 450 OLCI and SLSTR (Sentinel 3 A B)
-# 490 MERSI (Envisat)
-# Accept conditions ... 
-# https://ladsweb.modaps.eosdis.nasa.gov/archive/allData/450/
-# https://ladsweb.modaps.eosdis.nasa.gov/archive/allData/490/
-
-# https://ladsweb.modaps.eosdis.nasa.gov/tools-and-services/lws-classic/api.php#searchForFiles
 ##----------------------------------------------------------------------------. 
 def _modaps_sat_acronym(satellite, instrument):
     if ((satellite == "Terra") & (instrument == "MODIS")):
@@ -68,7 +55,7 @@ def get_products(satellite, instrument):
     modaps_inst = _modaps_sat_acronym(satellite, instrument)
     # Retrieve products 
     proxy = m.ModapsClient()
-    products = proxy.listProductsByInstrument(modaps_inst)
+    products = sorted(proxy.listProductsByInstrument(modaps_inst))
     return products
 
 ##----------------------------------------------------------------------------.
@@ -89,6 +76,7 @@ def get_collections_MODIS():
 def get_collections_AVHRR():
     collections = {'464': 'AVHRR Collection 4 - Long Term Data Record Level 1 (Archive Set 464)',
                    '465': 'AVHRR Collection 5 - Long Term Data Record Level 1 (Archive Set 465)'}
+    return collections
     
 def get_collections(product): 
     proxy = m.ModapsClient()
@@ -107,7 +95,7 @@ def get_connection_types():
     return ["https","opendap"]
 
 def get_LAADS_base_url(connection_type="https"):
-    if server_type == 'opendap':
+    if connection_type == 'opendap':
         base_url = "https://ladsweb.modaps.eosdis.nasa.gov/opendap/allData"
     else: # https or http
         base_url = "https://ladsweb.modaps.eosdis.nasa.gov/archive/allData"
@@ -161,7 +149,7 @@ def get_LAADS_filepaths(product,
     #-------------------------------------------------------------------------.
     # Retrieve file urls 
     fileIDs_formatted = ",".join(fileIDs)
-    filepaths = proxy.getFileUrls(fileIDs_formatted)  
+    filepaths = sorted(proxy.getFileUrls(fileIDs_formatted))
     #-------------------------------------------------------------------------.
     # Change to opendap if specified 
     if (connection_type == "opendap"):
@@ -524,6 +512,11 @@ def find_disk_filepaths(base_DIR,
     # Return filepaths
     return all_disk_filepaths
 
+#-----------------------------------------------------------------------------.
+
+
+
+
 #-----------------------------------------------------------------------------.   
 ##########################
 ### Download functions ###
@@ -555,8 +548,8 @@ def curl_cmd(server_path, disk_path, APP_KEY):
     cmd = "".join(["curl ",
                    "-v ",
                    "--connect-timeout 20 ",
-                   "--retry 100 ", 
-                   "--retry-delay 5 ",
+                   "--retry 5 ", 
+                   "--retry-delay 10 ",
                    "--tlsv1.2 ", # TSL/SSL
                    "-H 'Authorization: Bearer ", APP_KEY,"' ",
                    "--get ", server_path, " ",
@@ -574,21 +567,21 @@ def wget_cmd(server_path, disk_path, APP_KEY):
     #-------------------------------------------------------------------------.
     ## Define command to run
     cmd = "".join(["wget ",
-                 "-e robots=off ",  # allow wget to work ignoring robots.txt file 
+                 "-e robots=off ", # allow wget to work ignoring robots.txt file 
                  "-np ",           # prevents files from parent directories from being downloaded
                  "-R .html,.tmp ", # comma-separated list of rejected extensions
                  "-nH ",           # don't create host directories
                  "--secure-protocol=TLSv1_2 ", # TLS v1.2
                  "--header 'Authorization: Bearer ", APP_KEY,"' ", # identification
                  "-c ",            # continue from where it left 
-                 "--read-timeout=60 ", # if no data arriving for 5 seconds, retry
-                 "--tries=0 ",     # retry forever
+                 "--read-timeout=10", # if no data arriving for 10 seconds, retry
+                 "--tries=5 ",     # retry 5 times (0 forever)
                  "-O ", disk_path," ",
                  server_path])
     #-------------------------------------------------------------------------.
     return cmd    
 
-def run(commands, n_threads = 10):
+def run(commands, n_threads = 10, progress_bar=True, verbose=True):
     """
     Run bash commands in parallel using multithreading.
 
@@ -605,21 +598,44 @@ def run(commands, n_threads = 10):
     List of commands which didn't complete. 
 
     """
+    if (n_threads < 1):
+        n_threads = 1 
     n_threads = min(n_threads, 10) 
     n_cmds = len(commands)
-    with tqdm(total=n_cmds) as pbar: 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
-            dict_futures = {executor.submit(subprocess.check_call, cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL): cmd for cmd in commands}
-            # List cmds that didn't work 
+    ##------------------------------------------------------------------------.
+    # Run with progress bar
+    if progress_bar is True:
+        with tqdm(total=n_cmds) as pbar: 
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+                dict_futures = {executor.submit(subprocess.check_call, cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL): cmd for cmd in commands}
+                # List cmds that didn't work 
+                l_cmd_error = []
+                for future in concurrent.futures.as_completed(dict_futures.keys()):
+                    pbar.update(1) # Update the progress bar 
+                    # Collect all commands that caused problems 
+                    if future.exception() is not None:
+                        l_cmd_error.append(dict_futures[future])
+    ##------------------------------------------------------------------------.
+    # Run without progress bar 
+    else: 
+        if (n_threads == 1) and (verbose is True): 
+            print("Here")
+            print(commands)
+            _ = [subprocess.run(cmd, shell=True) for cmd in commands]
             l_cmd_error = []
-            for future in concurrent.futures.as_completed(dict_futures.keys()):
-                pbar.update(1) # Update the progress bar 
-                # Collect all commands that caused problems 
-                if future.exception() is not None:
-                    l_cmd_error.append(dict_futures[future])
-    
-    return l_cmd_error         
+        else:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=n_threads) as executor:
+                # Run commands and list those didn't work 
+                dict_futures = {executor.submit(subprocess.check_call, cmd, shell=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL): cmd for cmd in commands}
+                # List cmds that didn't work 
+                l_cmd_error = []
+                for future in concurrent.futures.as_completed(dict_futures.keys()):
+                    pbar.update(1) # Update the progress bar 
+                    # Collect all commands that caused problems 
+                    if future.exception() is not None:
+                        l_cmd_error.append(dict_futures[future])                    
 
+    return l_cmd_error         
 
 ##----------------------------------------------------------------------------.
 def download(base_DIR, 
@@ -633,6 +649,8 @@ def download(base_DIR,
              collections = None,
              force_download = False,
              n_threads = 10, 
+             progress_bar = True,
+             verbose = True,
              transfer_tool = "curl"):
     #-------------------------------------------------------------------------.  
     transfer_tool = check_transfer_tool(transfer_tool, force_download=force_download)
@@ -663,24 +681,11 @@ def download(base_DIR,
     ##-------------------------------------------------------------------------.
     # Run download commands in parallel
     # - Return a list of commands that didn't complete
-    bad_cmds = run(list_cmd, n_threads = n_threads)
+    bad_cmds = run(list_cmd, n_threads = n_threads, progress_bar=progress_bar, verbose=verbose)
     return bad_cmds 
        
 ##----------------------------------------------------------------------------.
 
-
-
-
-
-    
-    
-    
-    
-    
-    
-    
-    
-    
     
     
     
@@ -693,20 +698,9 @@ def download(base_DIR,
     
 
 
-  
+ 
     
-### TODO Parallel download   
-# https://stackoverflow.com/questions/14533458/python-threading-multiple-bash-subprocesses    
-    
-### TODO LOGGING
-# import logging
-## LOG.info("what you want")
-# LOG = logging.getLogger(__name__)
-# OUT_HDLR = logging.StreamHandler(sys.stdout)
-# OUT_HDLR.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
-# OUT_HDLR.setLevel(logging.INFO)
-# LOG.addHandler(OUT_HDLR)
-# LOG.setLevel(logging.DEBUG)    
+
     
     
      
